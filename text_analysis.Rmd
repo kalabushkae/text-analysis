@@ -1,0 +1,220 @@
+---
+title: 'Text Analysis in R'
+author: "Ekaterina Kalabush"
+output:
+  slidy_presentation: default
+  ioslides_presentation: default
+  beamer_presentation: default
+---
+
+## The required packages
+```{r setup, message = F, warning = F}
+knitr::opts_chunk$set(echo = T, message = F, warning = F, cache = T)
+setwd("C:/DA/hw2")
+library(tm)
+library(ggplot2)
+library(stopwords)
+library(stringr)
+library(dplyr)
+```
+
+## Count the total number X of letters in the last name
+```{r}
+x <- 'Kalabush'
+nchar(x)
+#Starting from observation
+y <- nchar(x)*50
+y
+```
+
+## Import Data
+```{r}
+rent <- as_tibble(data.table::fread("C:/DA/hw2/rent.csv", encoding= "UTF-8"))
+my_rent<-rent[1231:1631, ]
+head(my_rent)
+
+```
+
+## Data
+```{r}
+#Example of 'description'
+my_rent$description[1]
+dim(my_rent) 
+```
+
+## Preparing the dataset
+```{r}
+library(stringr)
+#remove duplicates
+dup_id<-my_rent %>%
+  count(description) %>%
+  filter(n > 1)
+
+dup_id
+
+rent_dist<-my_rent %>%
+  distinct(description, .keep_all = TRUE)
+#Now use only distinct 
+my_rent<-rent_dist
+
+#is there http?
+my_rent_detect<-my_rent %>% 
+  filter(str_detect(description,"http"))
+my_rent_detect$description[1] #Sample element with http
+
+#We see in data there are \\n (new line) and &amp. 
+#Remove http, emoj, \t
+removeURL <- function(x) {
+  gsub("http[^[:space:]]*", "", x)
+  iconv(x, "latin1", "ASCII", sub="")
+  gsub("[ \t]{2}", " ", x)
+  }
+my_rent$description<-removeURL(my_rent$description)
+
+#remove new lines
+my_rent$description <- str_replace_all(my_rent$description, "\\\\n" , " ")
+# rm ampersand
+my_rent$description <- str_replace_all(my_rent$description, "&amp", " ")
+my_rent$description <- str_replace_all(my_rent$description, "’", "'")
+```
+
+## Creating "corpus"
+```{r}
+#build a corpus
+myCorpus <- Corpus(VectorSource(my_rent$description))
+myCorpus[[1]]$content #Sample element in corpus
+
+#clean corpus. function from kaggle https://www.kaggle.com/erikbruin/text-mining-the-clinton-and-trump-election-tweets/report
+CleanCorpus <- function(x){
+  x <- tm_map(x, content_transformer(tolower))
+  x <- tm_map(x, removeNumbers) #remove numbers before removing words
+  x <- tm_map(x, removeWords, tidytext::stop_words$word)
+  x <- tm_map(x, removePunctuation)
+  x <- tm_map(x, stripWhitespace)
+  return(x)
+}
+
+myCorpus<-CleanCorpus(myCorpus)
+myCorpus[[1]]$content
+```
+
+## Stemming words
+```{r, cache=TRUE}
+# Keep a copy to use later as a dictionary for stem completion
+myCorpusCopy <- myCorpus
+# Stem words
+myCorpus <- tm_map(myCorpus, stemDocument)
+
+# Define the alternative function instead of stemCompletion in tm package
+stemCompletion2 <- function(x, dictionary) {
+  x <- unlist(strsplit(as.character(x), " "))
+  # Unexpectedly, stemCompletion completes an empty string to
+  # a word in dictionary. Remove empty string to avoid above issue.
+  x <- x[x != ""]
+  x <- stemCompletion(x, dictionary=dictionary)
+  x <- paste(x, sep="", collapse=" ")
+  PlainTextDocument(stripWhitespace(x))
+}
+myCorpus <- lapply(myCorpus, stemCompletion2, dictionary=myCorpusCopy)
+#Below - extract the first element from the list
+myCorpus <- Corpus(VectorSource(unlist(lapply(myCorpus, '[[', 1))))
+
+myCorpus[[1]]$content #Sample element in corpus 
+```
+
+## Document-Term Matrix
+```{r}
+CreateTermsMatrix <- function(x) {
+  x <- TermDocumentMatrix(x)
+  x <- as.matrix(x)
+  y <- rowSums(x)
+  y <- sort(y, decreasing=TRUE)
+  return(y)
+}
+
+TermFreq <- CreateTermsMatrix(myCorpus)
+
+word_df <- data.frame(word=names(TermFreq), count=TermFreq)
+
+dtm <- DocumentTermMatrix(myCorpus)
+dtm <- removeSparseTerms(dtm, 1-(10/length(myCorpus)))
+dtm
+
+#Inspect a part of matrix
+inspect(dtm[2:5, 7:15])
+```
+
+## Identifying  frequent words
+```{r}
+
+#tdm is a transpose of dtm
+tdm <- TermDocumentMatrix(myCorpus, control = list(wordLengths = c(1, Inf)))
+
+#Find frequent words with at least 25 cases
+(freq.terms <- findFreqTerms(tdm, lowfreq = 25))
+#Prepare for visualization
+term.freq <- rowSums(as.matrix(tdm))
+term.freq <- subset(term.freq, term.freq >= 25)
+df <- data.frame(term = names(term.freq), freq = term.freq)
+```
+
+## R code - visualize  frequent words
+```{r}
+#data frame with the most frequent words
+most_freq<-word_df %>% 
+  arrange(desc(count)) %>% 
+  top_n(20)
+
+most_freq
+#Create a plot 20 most frequent words
+ggplot(most_freq, aes(x = reorder(word, count), y = count, fill=factor(ifelse(word==most_freq$word[2], "Highlighted","Normal"))))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(name = "term", values=c("red","grey50"))+
+  coord_flip()+
+  theme(legend.position = "none")+
+  xlab("Words") + ylab("Count")
+
+```
+
+## Finding associations
+```{r}
+
+#find association with 2nd word                         
+freq_as<-findAssocs(tdm,"minutes" , 0.2)
+#create df to make plot
+freq_as<-as.data.frame(freq_as$minutes) 
+freq_as <- data.frame(term = row.names(freq_as), freq_as)
+rownames(freq_as) <- NULL
+#top 5 assosiations in data frame
+freq_as_top5<-freq_as %>% 
+  rename(freq=freq_as.minutes, ) %>% 
+  top_n(5)
+
+#check a sentence with word bluff
+proof <- data.frame(matrix(unlist(myCorpus), nrow=1001, byrow=T),stringsAsFactors=FALSE)
+names(proof)[1]<-'word'
+df_new<-proof %>% 
+  filter(str_detect(word,'airporttdrivetdistance'))
+#remove 5 words from freq_as because of error
+freq_as_top5<-freq_as[-c(1,2,3,4,5),] %>% 
+  rename(freq=freq_as.minutes, ) %>% 
+  top_n(5)
+freq_as_top5  
+
+#build a plot with assosiations
+ggplot(freq_as_top5, aes(x = reorder(term, freq), y = freq))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(name = "term", values=c("grey50"))+
+  coord_flip()+
+  xlab("Words") + ylab("Associated")
+```
+
+## Word cloud
+```{r}
+library(wordcloud)
+#create wordcloud
+wordcloud(word_df$word, word_df$count, max.words = 100, scale=c(2.5,.5), random.color = TRUE, colors=brewer.pal(9,"Set1"))
+wordcloud2::wordcloud2(word_df[1:100,], color = "random-light", backgroundColor = "grey", shuffle=FALSE, size=0.4)         
+
+```
+
